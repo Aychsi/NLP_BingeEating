@@ -1,0 +1,509 @@
+---
+title: "PredictCompBx_LongandShort"
+output: html_document
+date: "2022-09-08"
+---
+
+Load Libraries and set working directory
+```{r, warning = FALSE, results='hide', message=FALSE}
+setwd("/Users/hansoochang/Drexel/CBT+")
+
+library(epiR)
+library(dplyr)
+library(ROSE)
+library(caret)
+library(e1071)
+library(caretEnsemble)
+library(stringr)
+library(VIM)
+library(udpipe)
+```
+
+getDataCompBx and acc_res functions
+```{r}
+getDataCompBx <- function(data) {
+  
+  #predictors  
+  ind <- c("lagMS_Type", "lagMS_TimeElapsed", "lagMS_LOC", "lagCompBx", "lagUrges",  "lagMood", 
+           "lagMS_AteEnough", "lagMS_Macros", "lagMS_NoneAbove", "lagUrgeStrat",
+           "ParticipantID","days_in_study", "Entry_DateTime", "MS_FoodEaten", "lagMS_FoodRule",
+           "lagUrgeStratHelp", "lagMood_Strategy", "Entry_Delay")
+  
+  MLpred<-data[,ind]
+  
+  table(MLpred$lagMS_LOC)
+  table(MLpred$lagCompBx)
+  table(MLpred$lagUrges)
+  #specify the categorical variables.
+  MLpred$lagMS_Type <- as.factor(MLpred$lagMS_Type)
+  MLpred$lagMS_LOC <- as.numeric(MLpred$lagMS_LOC )
+  MLpred$lagCompBx <- as.numeric(MLpred$lagCompBx)
+  MLpred$lagUrges <- as.numeric(MLpred$lagUrges)
+  
+  table(MLpred$lagMS_LOC)
+  table(MLpred$lagCompBx)
+  table(MLpred$lagUrges)
+  
+  rows<-nrow(MLpred)
+  MLpred$TimeCat1<-matrix(0,rows,1)
+  MLpred$TimeCat2<-matrix(0,rows,1)
+  MLpred$TimeCat3<-matrix(0,rows,1)
+  MLpred$TimeCat4<-matrix(0,rows,1)
+  MLpred$TimeCat5<-matrix(0,rows,1)
+  MLpred$TimeCat6<-matrix(0,rows,1)
+  MLpred$TimeCat7<-matrix(0,rows,1)
+  ind1<-which(MLpred$lagMS_Type==2)
+  ind2<-which(MLpred$lagMS_Type==3)
+  ind3<-which(MLpred$lagMS_Type==4)
+  ind4<-which(MLpred$lagMS_Type==5)
+  ind5<-which(MLpred$lagMS_Type==6)
+  ind6<-which(MLpred$lagMS_Type==7)
+  ind7<-which(MLpred$lagMS_Type==8)
+  MLpred$TimeCat1[ind1] <-1
+  MLpred$TimeCat2[ind2] <-1
+  MLpred$TimeCat3[ind3] <-1
+  MLpred$TimeCat4[ind4] <-1
+  MLpred$TimeCat5[ind5] <-1
+  MLpred$TimeCat6[ind6] <-1
+  MLpred$TimeCat7[ind7] <-1
+  MLpred$lagMS_Type <- NULL
+
+  
+  ##get outcome
+  ind3 <- c("CompBx")
+  CompBx<-data[,ind3] 
+  CompBx <- as.factor(CompBx)
+  
+  ##Combine outcome and predictors
+  testdata.CompBx<-cbind(CompBx,MLpred)
+  
+  return(testdata.CompBx)
+}
+
+acc_res<-function (yhat, y) {
+  a<-length(which(yhat==y&y=="No") )
+  b<-length(which(yhat!=y&y=="Yes") )
+  c<-length(which(yhat!=y&y=="No") )
+  d<-length(which(yhat==y&y=="Yes") )
+  speci<-a/(a+c)
+  sensi<-d/(b+d)
+  acc<-(a+d)/length(y)
+  temp<-c(speci, sensi, acc)
+  return(temp)
+}
+```
+
+
+Read in dataframe with long list and initial cleaning
+```{r}
+LOC_All_CompBx <- read.csv("CBT+ RCT Records_Removed Study Period_Blank Responses_Low Quality_Complete Cases_All Predictors_CompBx.csv", header = TRUE, sep = ",", stringsAsFactors = T)
+
+LOC_All_CompBx$CompBx <- ifelse(LOC_All_CompBx$CompBx == 1, "Yes", "No") 
+
+
+LOC_All_CompBx[, "MS_LOC"] <- factor(LOC_All_CompBx[, "MS_LOC"])
+LOC_All_CompBx[, "lagMS_Type"] <- factor(LOC_All_CompBx[, "lagMS_Type"])
+LOC_All_CompBx[, "lagMS_LOC"] <- factor(LOC_All_CompBx[, "lagMS_LOC"])
+LOC_All_CompBx[, "lagCompBx"] <- factor(LOC_All_CompBx[, "lagCompBx"])
+LOC_All_CompBx[, "lagUrges"] <- factor(LOC_All_CompBx[, "lagUrges"])
+
+levels(LOC_All_CompBx$CompBx)=c("Yes","No")
+
+# Get time 
+s_length <- nchar(as.character(LOC_All_CompBx$Entry_DateTime))
+LOC_All_CompBx$time_entry_string <- trimws(substring(as.character(LOC_All_CompBx$Entry_DateTime), 
+                                                  s_length - 4, s_length))
+LOC_All_CompBx$time_entry_string <- strptime(LOC_All_CompBx$time_entry_string, "%H:%M")
+LOC_All_CompBx$formatted_entry_time <- substring(LOC_All_CompBx$time_entry_string, 12, 
+                                              nchar(LOC_All_CompBx$time_entry_string))
+
+
+## Get Date
+LOC_All_CompBx$date_entry_string <- substring(as.character(LOC_All_CompBx$Entry_DateTime), 1, nchar(as.character(LOC_All_CompBx$Entry_DateTime))-5)
+LOC_All_CompBx$date_entry_string <- trimws(LOC_All_CompBx$date_entry_string)
+
+LOC_All_CompBx$formatted_entry_date <- as.Date(LOC_All_CompBx$date_entry_string, "%m/%d/%Y")
+
+LOC_All_CompBx <- LOC_All_CompBx %>% 
+  group_by(ParticipantID) %>% 
+  mutate(startdate = min(formatted_entry_date)) %>%
+  ungroup()
+
+
+LOC_All_CompBx <- as.data.frame(LOC_All_CompBx)
+
+LOC_All_CompBx$days_in_study <- LOC_All_CompBx$formatted_entry_date - LOC_All_CompBx$startdate
+```
+
+Get every time when a participant goes 5+ hours without an entry. Days with only one entry are also
+marked. 
+```{r}
+
+
+LOC_All_CompBx <- LOC_All_CompBx %>% 
+  group_by(ParticipantID, formatted_entry_date) %>% 
+  mutate(time_between_hrs = (time_entry_string - lag(time_entry_string)) / 3600,
+            count_within_day = n()) %>% ungroup()
+
+LOC_All_CompBx <- as.data.frame(LOC_All_CompBx)
+
+hist(as.numeric(LOC_All_CompBx$time_between_hrs))
+sum(is.na(LOC_All_CompBx$time_between_hrs))
+
+View(LOC_All_CompBx)
+
+LOC_All_CompBx$Entry_Delay <- ifelse(LOC_All_CompBx$time_between_hrs >= 5 | 
+                                    (LOC_All_CompBx$count_within_day == 1), 1, 0)
+
+LOC_All_CompBx$Entry_Delay[is.na(LOC_All_CompBx$Entry_Delay)] <- 0
+
+table(LOC_All_CompBx$Entry_Delay)
+
+```
+
+
+```{r}
+LOC_All_CompBx <- LOC_All_CompBx[, c("CompBx","ParticipantID","days_in_study", "Entry_DateTime", "formatted_entry_date", 
+                               "lagMS_Type", "lagMS_TimeElapsed", "lagMS_LOC", "lagCompBx", "lagUrges",  "lagMood", 
+                               "lagMS_AteEnough", "lagMS_Macros", "lagMS_FoodRule", "lagMS_NoneAbove", "lagUrgeStrat",
+                               "lagUrgeStratHelp", "lagMood_Strategy", "MS_FoodEaten", "Entry_Delay")]
+
+
+# Remove rows with any NA's
+naOmit.CompBx <- na.omit(getDataCompBx(LOC_All_CompBx))
+nrow(na.omit(getDataCompBx(LOC_All_CompBx))) #14006 There were no NA's after doing getData
+```
+
+Get CompBx and non-CompBx by participant. Remove any who do not have enough CompBx or non-CompBx
+```{r}
+IDbyweeksCompBx <- getDataCompBx(LOC_All_CompBx) %>%
+  group_by(ParticipantID) %>%
+  summarize(nonCompBx = length(which(CompBx=="No")),
+            CompBx = length(which(CompBx=="Yes")))
+
+View(IDbyweeksCompBx)
+
+#remove subjects with too few data points in either CompBx or non-CompBx or overall. 2 or more...
+IDrm <- c("2013", "2028", "2043", "2045", "2049", "2054", "2057", "2059", "2060", "2063",
+          "2065", "2066", "2067", "2068", "2069", "2078", "2080", "2081", "2086", "2108",
+          "2122", "2124", "2126", "2135", "2138", "2139")
+LOC_All_CompBx = LOC_All_CompBx[-which(LOC_All_CompBx$ParticipantID%in%IDrm),]
+
+#Final cleaned df_CompBx
+df_CompBx <- getDataCompBx(LOC_All_CompBx)
+nrow(df_CompBx) #7706
+table(df_CompBx$CompBx)
+```
+
+
+Split into Training and Test Set
+```{r}
+#training and test sets split, 25% as a test set
+indx = unique(df_CompBx$ParticipantID)
+m = length(indx)
+indxTest = NULL
+#reschecking = NULL
+for (i in 1:m){
+  indx1 = which(df_CompBx$ParticipantID == indx[i] &df_CompBx$CompBx == "Yes")
+  indx2 = which(df_CompBx$ParticipantID == indx[i] &df_CompBx$CompBx == "No")
+  prop1 = round (length(indx1) * 0.25)
+  prop2 = round (length(indx2) * 0.25)
+  set.seed(i)
+  temp1 = sample(indx1, size = prop1)
+  temp2 = sample(indx2, size = prop2)
+  indxTest = c(indxTest , temp1, temp2)
+}
+train_CompBx <- df_CompBx[-indxTest, ]
+test_CompBx <- df_CompBx[indxTest, ]
+
+nrow(train_CompBx)
+table(train_CompBx$CompBx)
+#No  Yes 
+#5321  457
+
+nrow(test_CompBx)
+table(test_CompBx$CompBx)
+#No  Yes 
+#1775  153 
+```
+
+Find Foods with Highest CompBx to non-CompBx ratio
+```{r, warning = FALSE, results='hide', message=FALSE}
+### Find Foods that are predictive of CompBx ###
+# Make all words lower case and make relevant compound words.
+train_CompBx$MS_FoodEaten <- tolower(train_CompBx$MS_FoodEaten)
+train_CompBx$MS_FoodEaten <- sub("halo top", "icecream", train_CompBx$MS_FoodEaten)
+train_CompBx$MS_FoodEaten <- sub("ice cream", "icecream", train_CompBx$MS_FoodEaten)
+train_CompBx$MS_FoodEaten <- sub("protein shake", "proteinshake", train_CompBx$MS_FoodEaten)
+train_CompBx$MS_FoodEaten <- sub("trail mix", "trailmix", train_CompBx$MS_FoodEaten)
+
+test_CompBx$MS_FoodEaten <- tolower(test_CompBx$MS_FoodEaten)
+test_CompBx$MS_FoodEaten <- sub("halo top", "icecream", test_CompBx$MS_FoodEaten)
+test_CompBx$MS_FoodEaten <- sub("ice cream", "icecream", test_CompBx$MS_FoodEaten)
+test_CompBx$MS_FoodEaten <- sub("protein shake", "proteinshake", test_CompBx$MS_FoodEaten)
+test_CompBx$MS_FoodEaten <- sub("trail mix", "trailmix", test_CompBx$MS_FoodEaten)
+
+ud_model <- udpipe_download_model(language = "english")
+ud_model <- udpipe_load_model(ud_model$file_model)
+system.time( 
+  x <- udpipe_annotate(ud_model, x = train_CompBx$MS_FoodEaten, doc_id = train_CompBx$ParticipantID)
+)
+
+x <- as.data.frame(x)
+# Choose only nouns
+abc <- c("NN")
+stats <- dplyr::filter(x,grepl(pattern = paste(abc, collapse = "|"), x = xpos, ignore.case = T))
+
+# Words that are not helpful. I might have to remove chicken because it's too common...
+stats <- stats[-which(stats$lemma %in% c("pieces", "piece", "slice", "slices", "cups", "cup", "bag", 
+                                         "bowl", "bowls", "food")), ]
+
+sorted_food <- sort(table(stats$lemma), decreasing = T)
+```
+
+```{r}
+# merged words with original dataframe
+a <- merge(train_CompBx, stats, by.x = c("ParticipantID", "MS_FoodEaten"), 
+           by.y = c("doc_id", "sentence"))
+# By highest CompBx to non-CompBx ratio
+food_ratio <- as.data.frame(a %>% group_by(lemma) %>% 
+                              summarize(CompBxyes = sum(CompBx == "Yes"), CompBxno = sum (CompBx == "No")))
+food_ratio$tot_count <- food_ratio$CompBxyes + food_ratio$CompBxno
+food_ratio$ratio_yestono <- food_ratio$CompBxyes / food_ratio$CompBxno
+
+# remove infinites and replace with zero. None of infinites are useful since they are usually 
+# one CompBx episode with 0 non CompBx with a particular food
+food_ratio[sapply(food_ratio, is.infinite)] <- 0
+
+### it seems as though those with a high ratio have only a few occurrences. We should only include 
+# lemmas with 20 occurrences
+food_ratio_highqual <- food_ratio[food_ratio$tot_count > 20, ]
+onehalf_sd_above <- mean(food_ratio_highqual$ratio_yestono) + (1.5*sd(food_ratio_highqual$ratio_yestono))
+onehalf_sd_above
+
+
+# Since the 1.5 standard deviation above the mean is a ratio of 0.1237315, we will consider only foods with
+# a ratio of greater than 0.1237315 to be "dangerous foods." This gives us a similar ratio between
+# danger_food to non-danger_food and CompBx to non-CompBx
+View(food_ratio_highqual[food_ratio_highqual$ratio_yestono > onehalf_sd_above, ])
+
+top_CompBx_foods <- food_ratio_highqual[food_ratio_highqual$ratio_yestono > onehalf_sd_above, ]$lemma
+top_CompBx_foods
+```
+
+Add Dangerous Foods to training and test set dataframe
+```{r}
+# training
+train_CompBx$danger_food <- 0
+for (i in 1:length(train_CompBx$MS_FoodEaten)) {
+  for (food in top_CompBx_foods) {
+    if (str_detect(toString(train_CompBx$MS_FoodEaten[i]), food)) {
+      train_CompBx$danger_food[i] <- 1
+      break
+    }
+  }
+}
+table(train_CompBx$danger_food)
+
+# test
+test_CompBx$danger_food <- 0
+for (i in 1:length(test_CompBx$MS_FoodEaten)) {
+  for (food in top_CompBx_foods) {
+    if (str_detect(toString(test_CompBx$MS_FoodEaten[i]), food)) {
+      test_CompBx$danger_food[i] <- 1
+      break
+    }
+  }
+}
+table(test_CompBx$danger_food)
+table(df_CompBx$CompBx)
+```
+We can see that the ratios are relatively close.
+
+
+Get Dataframe with only Predictors and resample
+```{r}
+LOCtrain_CompBx = train_CompBx
+LOCtest_CompBx = test_CompBx
+LOCtrain.x.CompBx <- LOCtrain_CompBx[, !names(LOCtrain_CompBx) %in% c("CompBx", "ParticipantID", "Entry_DateTime")]
+LOCtest.x.CompBx = LOCtest_CompBx[, !names(LOCtest_CompBx) %in% c("CompBx", "ParticipantID", "Entry_DateTime")]
+
+# There seems to be one row with NA
+LOCtest.x.CompBx <- na.omit(LOCtest.x.CompBx)
+LOCtest_CompBx <- na.omit(LOCtest_CompBx)
+
+
+# resampling the training set (###LONG###)
+# The difference between this and the rose resampling is that this loop
+# resamples by participant, so that each participant has the same number of
+# LOC as non LOC
+indx = unique(LOCtrain_CompBx$ParticipantID)
+m = length(indx)
+LOCtrain.bal.CompBx = NULL
+for (i in 1:m){
+  indx1 = which(LOCtrain_CompBx$ParticipantID == indx[i] )
+  indx1no = which(LOCtrain_CompBx$ParticipantID == indx[i] 
+                  & LOCtrain_CompBx$CompBx == "No"   )
+  indx1yes = which(LOCtrain_CompBx$ParticipantID == indx[i] 
+                   & LOCtrain_CompBx$CompBx == "Yes"   )
+  # number of non-LOC cases
+  m1 = length(indx1no)
+  # number of LOC cases
+  m2 = length(indx1yes)
+  if(m1 > m2) {
+    set.seed(i)
+    temp1 = sample(indx1no, size = m2)
+    indxs = c(temp1, indx1yes)
+    LOCtrain.bal.CompBx = rbind(LOCtrain.bal.CompBx, LOCtrain_CompBx[indxs, ])
+  } else {
+    LOCtrain.bal.CompBx = rbind(LOCtrain.bal.CompBx, LOCtrain_CompBx[indx1, ])
+  }
+}
+
+LOCtrain.bal.x.CompBx <- LOCtrain.bal.CompBx[, !names(LOCtrain.bal.CompBx) %in% c("CompBx", "ParticipantID", "Entry_DateTime")]
+
+nrow(LOCtrain.bal.CompBx) #877
+table(LOCtrain.bal.CompBx$CompBx)
+```
+
+Check to see CompBx to non-CompBx ratio by participant
+```{r}
+IDbyweeks_trainbal_CompBx <- LOCtrain.bal.CompBx %>%
+  group_by(ParticipantID) %>%
+  summarize(weeks = min(abs(days_in_study))/7,
+            LOC = length(which(CompBx=="Yes")) ,
+            nonLOC = length(which(CompBx=="No")) )
+## By participant, the LOC to nonLOC ratio are not the same. Will need to fix for group + individual
+# level models.
+View(IDbyweeks_trainbal_CompBx)
+
+nrow(LOCtrain.bal.CompBx) # 877
+nrow(LOCtest.x.CompBx) # 1725
+```
+
+Modelling (Long List)
+```{r, warning = FALSE, results='hide', message=FALSE}
+#ensemble learning
+set.seed(123) 
+
+myControl <- trainControl(method = "repeatedcv",
+                          number = 10,
+                          repeats = 3,
+                          search = "grid",
+                          savePredictions = "final",
+                          index = createResample(LOCtrain.bal.CompBx$CompBx, 10),
+                          classProbs = TRUE)
+
+model_list_long <- caretList(CompBx ~ lagMS_TimeElapsed + lagMS_LOC + lagCompBx + lagUrges + lagMood 
+                             + TimeCat1 + TimeCat2 + TimeCat3 + TimeCat4 + TimeCat5 + TimeCat6 + TimeCat7 + 
+                               lagMS_AteEnough + lagMS_Macros + lagMS_FoodRule + lagMS_NoneAbove + lagUrgeStrat 
+                             + lagUrgeStratHelp + lagMood_Strategy + days_in_study + danger_food + Entry_Delay, 
+                             data=LOCtrain.bal.CompBx, trControl = myControl,  
+                             methodList =c("rf","nnet", "glm")
+)
+```
+
+Show Ensemble Results of Long list model 
+```{r}
+### Long ###
+model1 <- caretEnsemble(model_list_long) 
+model1$models
+summary(resamples(model_list_long))
+```
+
+Variable Importance
+```{r}
+varImp(model1)
+
+ggplot(data = varImp(model1), aes(x = reorder(rownames(varImp(model1)), varImp(model1)$overall), y = varImp(model1)$overall)) +
+  geom_bar(stat = "identity") + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(data = varImp(model1), aes(x = reorder(rownames(varImp(model1)), varImp(model1)$rf), y = varImp(model1)$rf)) +
+  geom_bar(stat = "identity") + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(data = varImp(model1), aes(x = reorder(rownames(varImp(model1)), varImp(model1)$nnet), y = varImp(model1)$nnet)) +
+  geom_bar(stat = "identity") + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(data = varImp(model1), aes(x = reorder(rownames(varImp(model1)), varImp(model1)$glm), y = varImp(model1)$glm)) +
+  geom_bar(stat = "identity") + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+
+Show Results on Training and Test Set
+```{r, warning=FALSE}
+#performance on the training set
+print("Training Set Matrix")
+table(predict(model1, LOCtrain.bal.x.CompBx), LOCtrain.bal.CompBx$CompBx)
+print("Training Set Specificity, Sensitivity, Accuracy")
+acc_res(predict(model1, LOCtrain.bal.x.CompBx), LOCtrain.bal.CompBx$CompBx)
+# confusionMatrix(table(predict(model1, LOCtrain.bal.long[, -1]), LOCtrain.bal.long$CompBx), positive ="Yes")
+```
+
+``` {r, warning=FALSE}
+# Performance on Test
+print("Test Set Matrix")
+confusionMatrix(table(predict(model1, LOCtest.x.CompBx), LOCtest_CompBx$CompBx), positive ="Yes")
+print("Test Set Specificity, Sensitivity, Accuracy")
+acc_res(predict(model1, LOCtest.x.CompBx), LOCtest_CompBx$CompBx)
+```
+Get Confidence Intervals for Specificity and Sensitivity
+```{r}
+rval <- epi.tests(table(predict(model1, LOCtest.x.CompBx),  LOCtest_CompBx$CompBx), conf.level = 0.95)
+rval
+```
+Switch the confidence intervals for sensitivity and specificity above. Package gives them flipped.
+
+
+Modelling Short List
+```{r, warning = FALSE, results='hide', message=FALSE}
+set.seed(123) 
+
+myControl <- trainControl(method = "repeatedcv",
+                          number = 10,
+                          repeats = 3,
+                          search = "grid",
+                          savePredictions = "final",
+                          index = createResample(LOCtrain.bal.CompBx$CompBx, 10),
+                          classProbs = TRUE)
+
+
+model_list_short <- caretList(CompBx ~ lagMS_TimeElapsed + lagMS_LOC + lagCompBx + lagUrges + lagMood + TimeCat1 
+                              + TimeCat2 + TimeCat3 + TimeCat4 + TimeCat5 + TimeCat6 + TimeCat7 + days_in_study 
+                              + danger_food + Entry_Delay, data=LOCtrain.bal.CompBx, trControl = myControl,  
+                              methodList =c("rf","nnet", "glm")
+)
+```
+
+Show Ensemble Results of short list model 
+```{r}
+### Short ###
+model1 <- caretEnsemble(model_list_short) 
+model1$models
+summary(resamples(model_list_short))
+```
+
+Show Results on Training and Test Set
+```{r, warning=FALSE}
+#performance on the training set
+print("Training Set Matrix")
+table(predict(model1, LOCtrain.bal.x.CompBx), LOCtrain.bal.CompBx$CompBx)
+print("Training Set Specificity, Sensitivity, Accuracy")
+acc_res(predict(model1, LOCtrain.bal.x.CompBx), LOCtrain.bal.CompBx$CompBx)
+# confusionMatrix(table(predict(model1, LOCtrain.bal.CompBx[, -1]), LOCtrain.bal.CompBx$CompBx), positive ="Yes")
+```
+
+``` {r, warning=FALSE}
+# Performance on Test
+
+print("Test Set Specificity, Sensitivity, Accuracy")
+acc_res(predict(model1, LOCtest.x.CompBx), LOCtest_CompBx$CompBx)
+print("Test Set Matrix")
+confusionMatrix(table(predict(model1, LOCtest.x.CompBx), LOCtest_CompBx$CompBx), positive ="Yes")
+```
+
+```{r}
+rval <- epi.tests(table(predict(model1, LOCtest.x.CompBx),  LOCtest_CompBx$CompBx), conf.level = 0.95)
+rval
+```
+Switch CI for sensitivity and Specificity above
